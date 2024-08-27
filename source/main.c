@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016 FIX94
+ * Copyright (C) 2018 FIX94
  *
  * This software may be modified and distributed under the terms
  * of the MIT license.  See the LICENSE file for details.
@@ -10,27 +10,16 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <dirent.h>
 #include <fat.h>
+#ifdef HW_RVL
+#include <wiiuse/wpad.h>
+#include "Poke_Transporter_GB_v1_0_0_gba.h"
+#endif
 
 //from my tests 50us seems to be the lowest
 //safe si transfer delay in between calls
 #define SI_TRANS_DELAY 50
-
-extern u8 gba_mb_gba[];
-extern u32 gba_mb_gba_size;
-
-void printmain()
-{
-	printf("\x1b[2J");
-	printf("\x1b[37m");
-	printf("GBA Link Cable Dumper v1.6 by FIX94\n");
-	printf("Save Support based on SendSave by Chishm\n");
-	printf("GBA BIOS Dumper by Dark Fader\n \n");
-}
 
 u8 *resbuf,*cmdbuf;
 
@@ -63,38 +52,12 @@ unsigned int docrc(u32 crc, u32 val)
 	return crc;
 }
 
-void endproc()
+static inline void wait_for_transfer()
 {
-	printf("Start pressed, exit\n");
-	VIDEO_WaitVSync();
-	VIDEO_WaitVSync();
-	exit(0);
+	//350 is REALLY pushing it already, cant go further
+	do{ usleep(350); }while(transval == 0);
 }
-void fixFName(char *str)
-{
-	u8 i = 0;
-	for(i = 0; i < strlen(str); ++i)
-	{
-		if(str[i] < 0x20 || str[i] > 0x7F)
-			str[i] = '_';
-		else switch(str[i])
-		{
-			case '\\':
-			case '/':
-			case ':':
-			case '*':
-			case '?':
-			case '\"':
-			case '<':
-			case '>':
-			case '|':
-				str[i] = '_';
-				break;
-			default:
-				break;
-		}
-	}
-}
+
 unsigned int calckey(unsigned int size)
 {
 	unsigned int ret = 0;
@@ -160,43 +123,27 @@ void send(u32 msg)
 	SI_Transfer(1,cmdbuf,5,resbuf,1,transcb,SI_TRANS_DELAY);
 	while(transval == 0) ;
 }
-bool dirExists(const char *path)
-{
-	DIR *dir;
-	dir = opendir(path);
-	if(dir)
-	{
-		closedir(dir);
-		return true;
-	}
-	return false;
+typedef struct _gbNames {
+	char name[256];
+} gbNames;
+
+int compare (const void * a, const void * b ) {
+  return strcmp((*(gbNames*)a).name, (*(gbNames*)b).name);
 }
-void createFile(const char *path, size_t size)
-{
-	int fd = open(path, O_WRONLY|O_CREAT);
-	if(fd >= 0)
-	{
-		ftruncate(fd, size);
-		close(fd);
-	}
-}
-void warnError(char *msg)
-{
-	puts(msg);
-	VIDEO_WaitVSync();
-	VIDEO_WaitVSync();
-	sleep(2);
-}
-void fatalError(char *msg)
-{
-	puts(msg);
-	VIDEO_WaitVSync();
-	VIDEO_WaitVSync();
-	sleep(5);
-	exit(0);
-}
+
+static const u32 logodat[39] = {
+ 0x24FFAE51, 0x699AA221, 0x3D84820A, 0x84E409AD, 0x11248B98, 0xC0817F21, 0xA352BE19, 0x9309CE20, 
+ 0x10464A4A, 0xF82731EC, 0x58C7E833, 0x82E3CEBF, 0x85F4DF94, 0xCE4B09C1, 0x94568AC0, 0x1372A7FC, 
+ 0x9F844D73, 0xA3CA9A61, 0x5897A327, 0xFC039876, 0x231DC761, 0x0304AE56, 0xBF388400, 0x40A70EFD, 
+ 0xFF52FE03, 0x6F9530F1, 0x97FBC085, 0x60D68025, 0xA963BE03, 0x014E38E2, 0xF9A234FF, 0xBB3E0344, 
+ 0x780090CB, 0x88113A94, 0x65C07C63, 0x87F03CAF, 0xD625E48B, 0x380AAC72, 0x21D4F807
+};
+
 int main(int argc, char *argv[]) 
 {
+	const uint8_t *romData = Poke_Transporter_GB_v1_0_0_gba;
+	size_t romSize = Poke_Transporter_GB_v1_0_0_gba_size;
+
 	void *xfb = NULL;
 	GXRModeObj *rmode = NULL;
 	VIDEO_Init();
@@ -214,26 +161,128 @@ int main(int argc, char *argv[])
 	CON_InitEx(rmode, x, y, w, h);
 	VIDEO_ClearFrameBuffer(rmode, xfb, COLOR_BLACK);
 	PAD_Init();
+#ifdef HW_RVL
+	WPAD_Init();
+#endif
 	cmdbuf = memalign(32,32);
 	resbuf = memalign(32,32);
-	u8 *testdump = memalign(32,0x400000);
-	if(!testdump) return 0;
-	if(!fatInitDefault())
+	u8 *gbaBuf = malloc(0x40000);
+	fatInitDefault();
+	int gbaCnt = 0;
+	DIR *dir = opendir("/gba");
+	struct dirent *dent;
+	gbNames *names;
+    if(dir!=NULL)
+    {
+        while((dent=readdir(dir))!=NULL)
+		{
+            if(strstr(dent->d_name,".gba") != NULL)
+				gbaCnt++;
+		}
+		closedir(dir);
+		names = malloc(sizeof(gbNames)*gbaCnt);
+		memset(names,0,sizeof(gbNames)*gbaCnt);
+		dir = opendir("/gba");
+		int i = 0;
+        while((dent=readdir(dir))!=NULL)
+		{
+            if(strstr(dent->d_name,".gba") != NULL)
+			{
+				strcpy(names[i].name,dent->d_name);
+				i++;
+			}
+		}
+		closedir(dir);
+    }
+	if(gbaCnt == 0)
 	{
-		printmain();
-		fatalError("ERROR: No usable device found to write dumped files to!");
+		printf("No Files! Make sure you have .gba files in your \"gba\" folder!\n");
+		VIDEO_WaitVSync();
+		VIDEO_WaitVSync();
+		sleep(5);
+		return 0;
 	}
-	mkdir("/dumps", S_IREAD | S_IWRITE);
-	if(!dirExists("/dumps"))
-	{
-		printmain();
-		fatalError("ERROR: Could not create dumps folder, make sure you have a supported device connected!");
-	}
+	qsort(names, gbaCnt, sizeof(gbNames), compare);
 	int i;
 	while(1)
 	{
-		printmain();
-		printf("Waiting for a GBA in port 2...\n");
+		i = 0;
+		while(1)
+		{
+			printf("\x1b[2J");
+			printf("\x1b[37m");
+			printf("GBA Link Cable ROM Sender v1.2 by FIX94\n");
+			printf("click the a button\n");
+			PAD_ScanPads();
+			VIDEO_WaitVSync();
+			u32 btns = PAD_ButtonsDown(0);
+			#ifdef HW_RVL
+			WPAD_ScanPads();
+			u32 wbtns = WPAD_ButtonsDown(0);
+			//merge wbtns into btns
+			if((wbtns & WPAD_BUTTON_A) || (wbtns & WPAD_CLASSIC_BUTTON_A))
+				btns |= PAD_BUTTON_A;
+			if((wbtns & WPAD_BUTTON_RIGHT) || (wbtns & WPAD_CLASSIC_BUTTON_RIGHT))
+				btns |= PAD_BUTTON_RIGHT;
+			if((wbtns & WPAD_BUTTON_LEFT) || (wbtns & WPAD_CLASSIC_BUTTON_LEFT))
+				btns |= PAD_BUTTON_LEFT;
+			if((wbtns & WPAD_BUTTON_HOME) || (wbtns & WPAD_CLASSIC_BUTTON_HOME))
+				btns |= PAD_BUTTON_START;
+			#endif
+			//handle selected option
+			if(btns & PAD_BUTTON_A)
+				break;
+			else if(btns & PAD_BUTTON_START)
+			{
+				printf("Exit...\n");
+				VIDEO_WaitVSync();
+				VIDEO_WaitVSync();
+				sleep(5);
+				return 0;
+			}
+		}
+		// Directly use the ROM data from memory
+		size_t gbaSize = romSize;
+		if (gbaSize > 0x40000) {
+			printf("ROM larger than 256KB!\n");
+			VIDEO_WaitVSync();
+			sleep(2);
+			continue;
+		}
+
+		// Copy the ROM data to gbaBuf
+		memcpy(gbaBuf, romData, gbaSize);
+		
+		if(memcmp(gbaBuf+4, logodat, sizeof(logodat)) != 0)
+		{
+			printf("GBA header logo broken! Fixing logo\n");
+			memcpy(gbaBuf+4, logodat, sizeof(logodat));
+		}
+		if(gbaBuf[0xB2] != 0x96)
+		{
+			printf("GBA header value incorrect (0x%02X)! Fixing value (0x96)\n", gbaBuf[0xB2]);
+			gbaBuf[0xB2] = 0x96;
+		}
+		u8 chk = 0;
+		for(i = 0xA0; i < 0xBD; i++)
+			chk -= gbaBuf[i];
+		chk -= 0x19;
+		if(gbaBuf[0xBD] != chk)
+		{
+			printf("GBA header checksum incorrect (0x%02X)! Fixing checksum (0x%02X)\n", gbaBuf[0xBD], chk);
+			gbaBuf[0xBD] = chk;
+		}
+		if(*(u32*)(gbaBuf+0xE4) == 0x0010A0E3 && *(u32*)(gbaBuf+0xEC) == 0xC010A0E3 &&
+			*(u32*)(gbaBuf+0x100) == 0xFCFFFF1A && *(u32*)(gbaBuf+0x118) == 0x040050E3 &&
+			*(u32*)(gbaBuf+0x11C) == 0xFBFFFF1A && *(u32*)(gbaBuf+0x12C) == 0x020050E3 &&
+			*(u32*)(gbaBuf+0x130) == 0xFBFFFF1A && *(u32*)(gbaBuf+0x140) == 0xFEFFFF1A)
+		{
+			printf("Gamecube multiboot rom, patching entry point\n");
+			//jump over joyboot handshake
+			*(u32*)(gbaBuf+0xE0) = 0x170000EA;
+		}
+
+		printf("Waiting for GBA in port 2...\n");
 		resval = 0;
 
 		SI_GetTypeAsync(1,acb);
@@ -249,22 +298,18 @@ int main(int argc, char *argv[])
 				else if(resval)
 					break;
 			}
-			PAD_ScanPads();
-			VIDEO_WaitVSync();
-			if(PAD_ButtonsHeld(0))
-				endproc();
 		}
 		if(resval & SI_GBA)
 		{
-			printf("GBA Found! Waiting on BIOS\n");
+			printf("GBA Found! Waiting for BIOS\n");
 			resbuf[2]=0;
 			while(!(resbuf[2]&0x10))
 			{
 				doreset();
 				getstatus();
 			}
-			printf("Ready, sending dumper\n");
-			unsigned int sendsize = ((gba_mb_gba_size+7)&~7);
+			printf("GBA Ready, sending ROM File\n");
+			unsigned int sendsize = (((gbaSize)+7)&~7);
 			unsigned int ourkey = calckey(sendsize);
 			//printf("Our Key: %08x\n", ourkey);
 			//get current sessionkey
@@ -275,11 +320,11 @@ int main(int argc, char *argv[])
 			unsigned int fcrc = 0x15a0;
 			//send over gba header
 			for(i = 0; i < 0xC0; i+=4)
-				send(__builtin_bswap32(*(vu32*)(gba_mb_gba+i)));
-			//printf("Header done! Sending ROM...\n");
+				send(__builtin_bswap32(*(vu32*)(gbaBuf+i)));
+			//printf("Header done! Sending Goomba...\n");
 			for(i = 0xC0; i < sendsize; i+=4)
 			{
-				u32 enc = ((gba_mb_gba[i+3]<<24)|(gba_mb_gba[i+2]<<16)|(gba_mb_gba[i+1]<<8)|(gba_mb_gba[i]));
+				u32 enc = ((gbaBuf[i+3]<<24)|(gbaBuf[i+2]<<16)|(gbaBuf[i+1]<<8)|(gbaBuf[i]));
 				fcrc=docrc(fcrc,enc);
 				sessionkey = (sessionkey*0x6177614B)+1;
 				enc^=sessionkey;
@@ -297,259 +342,10 @@ int main(int argc, char *argv[])
 			send(fcrc);
 			//get crc back (unused)
 			recv();
-			printf("Done!\n");
-			sleep(2);
-			//hm
-			while(1)
-			{
-				printmain();
-				printf("Press A once you have a GBA Game inserted.\n");
-				printf("Press Y to backup the GBA BIOS.\n \n");
-				PAD_ScanPads();
-				VIDEO_WaitVSync();
-				u32 btns = PAD_ButtonsDown(0);
-				if(btns&PAD_BUTTON_START)
-					endproc();
-				else if(btns&PAD_BUTTON_A)
-				{
-					if(recv() == 0) //ready
-					{
-						printf("Waiting for GBA\n");
-						VIDEO_WaitVSync();
-						int gbasize = 0;
-						while(gbasize == 0)
-							gbasize = __builtin_bswap32(recv());
-						send(0); //got gbasize
-						u32 savesize = __builtin_bswap32(recv());
-						send(0); //got savesize
-						if(gbasize == -1) 
-						{
-							warnError("ERROR: No (Valid) GBA Card inserted!\n");
-							continue;
-						}
-						//get rom header
-						for(i = 0; i < 0xC0; i+=4)
-							*(vu32*)(testdump+i) = recv();
-						//print out all the info from the  game
-						printf("Game Name: %.12s\n",(char*)(testdump+0xA0));
-						printf("Game ID: %.4s\n",(char*)(testdump+0xAC));
-						printf("Company ID: %.2s\n",(char*)(testdump+0xB0));
-						printf("ROM Size: %02.02f MB\n",((float)(gbasize/1024))/1024.f);
-						if(savesize > 0)
-							printf("Save Size: %02.02f KB\n \n",((float)(savesize))/1024.f);
-						else
-							printf("No Save File\n \n");
-						//generate file paths
-						char gamename[64];
-						sprintf(gamename,"/dumps/%.12s [%.4s%.2s].gba",
-							(char*)(testdump+0xA0),(char*)(testdump+0xAC),(char*)(testdump+0xB0));
-						fixFName(gamename+7); //fix name behind "/dumps/"
-						char savename[64];
-						sprintf(savename,"/dumps/%.12s [%.4s%.2s].sav",
-							(char*)(testdump+0xA0),(char*)(testdump+0xAC),(char*)(testdump+0xB0));
-						fixFName(savename+7); //fix name behind "/dumps/"
-						//let the user choose the option
-						printf("Press A to dump this game, it will take about %i minutes.\n",gbasize/1024/1024*3/2);
-						printf("Press B if you want to cancel dumping this game.\n");
-						if(savesize > 0)
-						{
-							printf("Press Y to backup this save file.\n");
-							printf("Press X to restore this save file.\n");
-							printf("Press Z to clear the save file on the GBA Cartridge.\n\n");
-						}
-						else
-							printf("\n");
-						int command = 0;
-						while(1)
-						{
-							PAD_ScanPads();
-							VIDEO_WaitVSync();
-							u32 btns = PAD_ButtonsDown(0);
-							if(btns&PAD_BUTTON_START)
-								endproc();
-							else if(btns&PAD_BUTTON_A)
-							{
-								command = 1;
-								break;
-							}
-							else if(btns&PAD_BUTTON_B)
-								break;
-							else if(savesize > 0)
-							{
-								if(btns&PAD_BUTTON_Y)
-								{
-									command = 2;
-									break;
-								}
-								else if(btns&PAD_BUTTON_X)
-								{
-									command = 3;
-									break;
-								}
-								else if(btns&PAD_TRIGGER_Z)
-								{
-									command = 4;
-									break;
-								}
-							}
-						}
-						if(command == 1)
-						{
-							FILE *f = fopen(gamename,"rb");
-							if(f)
-							{
-								fclose(f);
-								command = 0;
-								warnError("ERROR: Game already dumped!\n");
-							}
-						}
-						else if(command == 2)
-						{
-							FILE *f = fopen(savename,"rb");
-							if(f)
-							{
-								fclose(f);
-								command = 0;
-								warnError("ERROR: Save already backed up!\n");
-							}
-						}
-						else if(command == 3)
-						{
-							size_t readsize = 0;
-							FILE *f = fopen(savename,"rb");
-							if(f)
-							{
-								fseek(f,0,SEEK_END);
-								readsize = ftell(f);
-								if(readsize != savesize)
-								{
-									command = 0;
-									warnError("ERROR: Save has the wrong size, aborting restore!\n");
-								}
-								else
-								{
-									rewind(f);
-									fread(testdump,readsize,1,f);
-								}
-								fclose(f);
-							}
-							else
-							{
-								command = 0;
-								warnError("ERROR: No Save to restore!\n");
-							}
-						}
-						send(command);
-						//let gba prepare
-						sleep(1);
-						if(command == 0)
-							continue;
-						else if(command == 1)
-						{
-							//create base file with size
-							printf("Preparing file...\n");
-							createFile(gamename,gbasize);
-							FILE *f = fopen(gamename,"wb");
-							if(!f)
-								fatalError("ERROR: Could not create file! Exit...");
-							printf("Dumping...\n");
-							u32 bytes_read = 0;
-							while(gbasize > 0)
-							{
-								int toread = (gbasize > 0x400000 ? 0x400000 : gbasize);
-								int j;
-								for(j = 0; j < toread; j+=4)
-								{
-									*(vu32*)(testdump+j) = recv();
-									bytes_read+=4;
-									if((bytes_read&0xFFFF) == 0)
-										printf("\r%02.02f MB done",(float)(bytes_read/1024)/1024.f);
-								}
-								fwrite(testdump,toread,1,f);
-								gbasize -= toread;
-							}
-							printf("\nClosing file\n");
-							fclose(f);
-							printf("Game dumped!\n");
-							sleep(5);
-						}
-						else if(command == 2)
-						{
-							//create base file with size
-							printf("Preparing file...\n");
-							createFile(savename,savesize);
-							FILE *f = fopen(savename,"wb");
-							if(!f)
-								fatalError("ERROR: Could not create file! Exit...");
-							printf("Waiting for GBA\n");
-							VIDEO_WaitVSync();
-							u32 readval = 0;
-							while(readval != savesize)
-								readval = __builtin_bswap32(recv());
-							send(0); //got savesize
-							printf("Receiving...\n");
-							for(i = 0; i < savesize; i+=4)
-								*(vu32*)(testdump+i) = recv();
-							printf("Writing save...\n");
-							fwrite(testdump,savesize,1,f);
-							fclose(f);
-							printf("Save backed up!\n");
-							sleep(5);
-						}
-						else if(command == 3 || command == 4)
-						{
-							u32 readval = 0;
-							while(readval != savesize)
-								readval = __builtin_bswap32(recv());
-							if(command == 3)
-							{
-								printf("Sending save\n");
-								VIDEO_WaitVSync();
-								for(i = 0; i < savesize; i+=4)
-									send(__builtin_bswap32(*(vu32*)(testdump+i)));
-							}
-							printf("Waiting for GBA\n");
-							while(recv() != 0)
-								VIDEO_WaitVSync();
-							printf(command == 3 ? "Save restored!\n" : "Save cleared!\n");
-							send(0);
-							sleep(5);
-						}
-					}
-				}
-				else if(btns&PAD_BUTTON_Y)
-				{
-					const char *biosname = "/dumps/gba_bios.bin";
-					FILE *f = fopen(biosname,"rb");
-					if(f)
-					{
-						fclose(f);
-						warnError("ERROR: BIOS already backed up!\n");
-					}
-					else
-					{
-						//create base file with size
-						printf("Preparing file...\n");
-						createFile(biosname,0x4000);
-						f = fopen(biosname,"wb");
-						if(!f)
-							fatalError("ERROR: Could not create file! Exit...");
-						//send over bios dump command
-						send(5);
-						//the gba might still be in a loop itself
-						sleep(1);
-						//lets go!
-						printf("Dumping...\n");
-						for(i = 0; i < 0x4000; i+=4)
-							*(vu32*)(testdump+i) = recv();
-						fwrite(testdump,0x4000,1,f);
-						printf("Closing file\n");
-						fclose(f);
-						printf("BIOS dumped!\n");
-						sleep(5);
-					}
-				}
-			}
+			printf("All done!\n");
+			VIDEO_WaitVSync();
+			VIDEO_WaitVSync();
+			sleep(3);
 		}
 	}
 	return 0;

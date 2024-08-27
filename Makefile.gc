@@ -15,7 +15,7 @@ include $(DEVKITPPC)/gamecube_rules
 # SOURCES is a list of directories containing source code
 # INCLUDES is a list of directories containing extra header files
 #---------------------------------------------------------------------------------
-TARGET		:=	linkcabledump_gc
+TARGET		:=	gbaromsend_gc
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
@@ -25,7 +25,7 @@ INCLUDES	:=	source
 # options for code generation
 #---------------------------------------------------------------------------------
 
-CFLAGS	= -g -O3 -Wall $(MACHDEP) $(INCLUDE)
+CFLAGS	= -g -O2 -Wall $(MACHDEP) $(INCLUDE)
 CXXFLAGS	=	$(CFLAGS)
 
 LDFLAGS	= -g $(MACHDEP) -Wl,-Map,$(notdir $@).map
