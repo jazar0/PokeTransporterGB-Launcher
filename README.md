@@ -1,6 +1,5 @@
-# gba-link-cable-rom-sender
-GC/Wii homebrew to send over multiboot .gba roms to a gba using the gc gba link cable.  
+# Poke Transporter GB Launcher
+A fork of FIX94's gba-multiboot-rom-sender 
+Wii application to launch Poke Transporter GB from the Wii/Gamecube from a Gamecube controller port.
 
-# Usage
-All you need is a folder called "gba" on your main device (sd gecko on gamecube and sd/usb on wii) and put in some multiboot .gba files (256kb or smaller).  
-If you then start gba-link-cable-rom-sender you can just select the file you want and transfer it to your gba in port 2 by pressing A.  
+Currently public but unfinished.
